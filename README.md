@@ -1,114 +1,225 @@
-# Excel Import CRUD (Go + Gin + MySQL + Redis)
+# Assignment Import API
 
-A small, self-contained Gin API that:
+A simple Go + Gin REST API for importing assignment user data from CSV into MySQL and caching the results in Redis.
 
-1. Accepts an `.xlsx` upload, validates it, and imports it **asynchronously**.
-2. Stores the rows in MySQL.
-3. Caches reads in Redis (5-minute TTL).
-4. Lets you list, view, edit, and delete the imported records (CRUD), keeping
-   MySQL and Redis in sync.
+## What this project does
 
-The whole app is deliberately kept in a single `main` package with one file
-per concern (`db.go`, `cache.go`, `excel.go`, `handlers.go`, ...) instead of
-a layered/DI architecture, so the flow of a request is easy to follow
-top-to-bottom.
+- Uploads a CSV file and imports valid rows into MySQL
+- Supports CRUD operations for assignment users
+- Uses Redis to cache list and detail reads
+- Refreshes the Redis list cache after import/create/update/delete operations
 
-## Project layout
+## Tech stack
 
-```
-main.go          entry point: config, connections, routes
-config.go        env-var based configuration
-models.go        Customer / UpdateCustomerInput / JobStatus structs
-db.go            MySQL connection + table creation
-repository.go    SQL queries (insert/list/get/update/delete)
-cache.go         Redis read/write helpers (5 min TTL)
-excel.go         Excel parsing + header/row validation
-jobs.go          in-memory tracker for async import jobs
-handlers.go      HTTP handlers (upload, jobs, CRUD)
-response.go      consistent JSON response helpers
-postman_collection.json  ready-to-import Postman collection
-```
+- Go
+- Gin web framework
+- sqlx + MySQL
+- Redis via go-redis
+- Zerolog for logging
 
-## Requirements
+## Prerequisites
 
 - Go 1.22+
-- MySQL running locally (or update `MYSQL_DSN`)
-- Redis running locally (or update `REDIS_ADDR`)
+- MySQL running locally or in Docker
+- Redis running locally or in Docker
 
-## Setup
+## Configuration
 
-```bash
-cp .env.example .env      # edit if your MySQL/Redis differ from the defaults
-export $(cat .env | xargs)
+Update the database and Redis settings in [services/core/app/config.yaml](services/core/app/config.yaml).
 
-go mod tidy                # downloads gin, mysql driver, redis client, excelize
-go run .
-```
+Example defaults:
+- Server port: 9025
+- MySQL: localhost:3306, database assignmentdb
+- Redis: localhost:6379
 
-The app creates the `customers` table automatically on startup (`CREATE
-TABLE IF NOT EXISTS`), so no manual migration is needed — just make sure the
-database named in `MYSQL_DSN` (default `assignment_db`) already exists:
+## Database setup
+
+### 1) Start MySQL
+If MySQL is not already running, start it locally or using Docker.
+
+### 2) Create the database
+Run the following SQL in MySQL:
 
 ```sql
-CREATE DATABASE IF NOT EXISTS assignment_db;
+CREATE DATABASE assignmentdb;
+USE assignmentdb;
 ```
 
-> **Note:** this environment could not reach the public Go module proxy, so
-> `go.sum` is not included. Running `go mod tidy` once with normal internet
-> access will fetch the dependencies and generate it.
+### 3) Create the table
+Use this table structure:
 
-## Excel file format
-
-The first row must be a header row containing at least: `first_name`,
-`last_name`, `email` (case-insensitive, spaces are treated as underscores).
-These optional columns are also read if present: `company_name`, `address`,
-`city`, `county`, `postal`, `phone`, `web`. Rows missing a required field are
-skipped and counted, not failed — the import still completes for the valid
-rows.
-
-## API
-
-| Method | Path                  | Description                                   |
-|--------|-----------------------|------------------------------------------------|
-| POST   | `/api/upload`         | Upload an `.xlsx` file (form field: `file`). Returns a `job_id` immediately; import runs in the background. |
-| GET    | `/api/jobs/:id`       | Check the status of an import (`processing` / `completed` / `failed`). |
-| GET    | `/api/customers`      | List all customers. Served from Redis if cached, else MySQL (and re-caches). |
-| GET    | `/api/customers/:id`  | Get one customer, same cache-aside behavior.  |
-| PUT    | `/api/customers/:id`  | Update any subset of fields (JSON body). Updates MySQL then refreshes the Redis cache. |
-| DELETE | `/api/customers/:id`  | Delete a customer from MySQL and Redis.       |
-
-### Example: upload
-
-```bash
-curl -F "file=@customers.xlsx" http://localhost:8080/api/upload
+```sql
+CREATE TABLE `assignment_users` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `first_name` varchar(100) NOT NULL,
+  `last_name` varchar(100) NOT NULL,
+  `company_name` varchar(255) DEFAULT NULL,
+  `address` varchar(255) DEFAULT NULL,
+  `city` varchar(150) DEFAULT NULL,
+  `county` varchar(150) DEFAULT NULL,
+  `postal` varchar(20) DEFAULT NULL,
+  `phone` varchar(30) DEFAULT NULL,
+  `email` varchar(255) DEFAULT NULL,
+  `web` varchar(255) DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted_at` timestamp NULL DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 ```
 
-### Example: update
+> The app also creates the table automatically if it does not exist, but creating it manually is recommended.
+
+## Redis setup
+
+### 1) Start Redis
+If Redis is not already running, start it locally or using Docker.
+
+### 2) Verify Redis is available
+```bash
+redis-cli ping
+```
+
+Expected response:
+
+```text
+PONG
+```
+
+## Run the application
 
 ```bash
-curl -X PUT http://localhost:8080/api/customers/1 \
+cd /home/scalent/Downloads/assignment
+go run ./services/core/app
+```
+
+The server will start at:
+
+```text
+http://localhost:9025
+```
+
+## API endpoints
+
+Base URL:
+
+```text
+http://localhost:9025/tms-core/assignment-user
+```
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| POST | /upload-csv | Upload and import a CSV file |
+| POST | / | Create a new assignment user |
+| PATCH | /:id | Partial update an assignment user |
+| DELETE | /:id | Soft delete an assignment user |
+| GET | /:id | Get one assignment user |
+| GET | / | List all assignment users |
+
+## CSV format
+
+The CSV file must include these headers:
+
+```text
+first_name,last_name,company_name,address,city,county,postal,phone,email,web
+```
+
+### Example CSV file
+
+```csv
+first_name,last_name,company_name,address,city,county,postal,phone,email,web
+John,Doe,Acme Inc,123 Main St,Springfield,Greene,62704,5551234,john@example.com,https://example.com
+Jane,Smith,Tech Labs,456 Oak Rd,Lincoln,Logan,62656,5555678,jane@example.com,https://techlabs.com
+```
+
+## Validation rules
+
+### CSV validation
+- File must be a `.csv` file
+- File size must be less than 10 MB
+- Header must contain all required columns:
+  - `first_name`
+  - `last_name`
+  - `company_name`
+  - `address`
+  - `city`
+  - `county`
+  - `postal`
+  - `phone`
+  - `email`
+  - `web`
+- Rows with missing required values are ignored
+- Email format is validated if provided
+- Phone length must be at least 5 characters if provided
+- Postal code length must be at least 2 characters if provided
+
+### API validation
+- `firstName` is required
+- `lastName` is required
+- Other fields are optional
+- Update requests support partial update
+
+## Example curl commands
+
+### Upload CSV
+
+```bash
+curl -X POST "http://localhost:9025/tms-core/assignment-user/upload-csv" \
+  -F "csvFile=@/path/to/users.csv"
+```
+
+### Create a user
+
+```bash
+curl -X POST "http://localhost:9025/tms-core/assignment-user/" \
   -H "Content-Type: application/json" \
-  -d '{"city": "New City", "phone": "1234567890"}'
+  -d '{
+    "firstName": "John",
+    "lastName": "Doe",
+    "companyName": "Acme Inc",
+    "email": "john@example.com"
+  }'
 ```
 
-A ready-to-import `postman_collection.json` is included with all of the
-above requests set up.
+### Get all users
 
-## Design notes
+```bash
+curl -X GET "http://localhost:9025/tms-core/assignment-user/"
+```
 
-- **Async import**: the upload handler validates the file synchronously
-  (format, headers) but hands the row-by-row insert off to a goroutine, so
-  the client isn't blocked while thousands of rows are written. Progress can
-  be polled via `/api/jobs/:id`.
-- **Batch inserts**: rows are inserted in chunks of 200 in a single `INSERT
-  ... VALUES (...), (...), ...` statement instead of one query per row.
-- **Cache-aside reads**: `GET` endpoints check Redis first and only hit
-  MySQL on a miss, then repopulate the cache (5 minute TTL).
-- **Write-through updates**: `PUT` updates MySQL, refreshes the single-record
-  cache entry, and drops the now-stale "all customers" list cache so the
-  next list read rebuilds it.
-- **Horizontal scaling**: the app is stateless except for the in-memory job
-  tracker (which is only used for progress reporting, not correctness) — you
-  can run multiple instances behind a load balancer pointed at the same
-  MySQL/Redis, and connection pool limits are set on the MySQL client to
-  avoid one instance exhausting the database.
+### Get one user
+
+```bash
+curl -X GET "http://localhost:9025/tms-core/assignment-user/1"
+```
+
+### Update a user
+
+```bash
+curl -X PATCH "http://localhost:9025/tms-core/assignment-user/1" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "companyName": "Updated Company",
+    "phone": "555-9876"
+  }'
+```
+
+### Delete a user
+
+```bash
+curl -X DELETE "http://localhost:9025/tms-core/assignment-user/1"
+```
+
+## Redis behavior
+
+- Reads are served from Redis when available
+- The list cache key is: assignment_users:list
+- Detail cache keys are stored as: assignment_users:detail:<id>
+- Cache entries expire after 5 minutes
+- Import/create/update/delete operations refresh the list cache from MySQL
+
+## Notes
+
+- Records are soft deleted using the `deleted_at` column
+- The list and detail APIs only return rows where `deleted_at IS NULL`
+- The application is designed as a simple assignment project and keeps the implementation focused on CSV import + CRUD + Redis caching
