@@ -1,0 +1,17 @@
+server:
+  port: :9025
+  readTimeout: 2s
+  writeTimeout: 2s
+  idleTimeout: 2s
+db:
+  driver: "mysql"
+  host: "localhost"
+  user: "root"
+  pass: "password"
+  name: "falcondb"
+cache:
+  host: "localhost" # Correct container name
+  port: 6379 # Use the correct exposed port
+  user: "default"
+  pass: ""
+  DB: 0 
