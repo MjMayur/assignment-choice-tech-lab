@@ -38,14 +38,37 @@ Example defaults:
 If MySQL is not already running, start it locally or using Docker.
 
 ### 2) Create the database
-Run the following in MySQL:
+Run the following SQL in MySQL:
 
 ```sql
 CREATE DATABASE assignmentdb;
+USE assignmentdb;
 ```
 
-### 3) Verify the connection
-The app will automatically create the required table named `assignment_users` when it starts.
+### 3) Create the table
+Use this table structure:
+
+```sql
+CREATE TABLE `assignment_users` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `first_name` varchar(100) NOT NULL,
+  `last_name` varchar(100) NOT NULL,
+  `company_name` varchar(255) DEFAULT NULL,
+  `address` varchar(255) DEFAULT NULL,
+  `city` varchar(150) DEFAULT NULL,
+  `county` varchar(150) DEFAULT NULL,
+  `postal` varchar(20) DEFAULT NULL,
+  `phone` varchar(30) DEFAULT NULL,
+  `email` varchar(255) DEFAULT NULL,
+  `web` varchar(255) DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted_at` timestamp NULL DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+```
+
+> The app also creates the table automatically if it does not exist, but creating it manually is recommended.
 
 ## Redis setup
 
@@ -53,13 +76,11 @@ The app will automatically create the required table named `assignment_users` wh
 If Redis is not already running, start it locally or using Docker.
 
 ### 2) Verify Redis is available
-You can test it with:
-
 ```bash
 redis-cli ping
 ```
 
-If Redis is running correctly, it should return:
+Expected response:
 
 ```text
 PONG
@@ -102,6 +123,41 @@ The CSV file must include these headers:
 ```text
 first_name,last_name,company_name,address,city,county,postal,phone,email,web
 ```
+
+### Example CSV file
+
+```csv
+first_name,last_name,company_name,address,city,county,postal,phone,email,web
+John,Doe,Acme Inc,123 Main St,Springfield,Greene,62704,5551234,john@example.com,https://example.com
+Jane,Smith,Tech Labs,456 Oak Rd,Lincoln,Logan,62656,5555678,jane@example.com,https://techlabs.com
+```
+
+## Validation rules
+
+### CSV validation
+- File must be a `.csv` file
+- File size must be less than 10 MB
+- Header must contain all required columns:
+  - `first_name`
+  - `last_name`
+  - `company_name`
+  - `address`
+  - `city`
+  - `county`
+  - `postal`
+  - `phone`
+  - `email`
+  - `web`
+- Rows with missing required values are ignored
+- Email format is validated if provided
+- Phone length must be at least 5 characters if provided
+- Postal code length must be at least 2 characters if provided
+
+### API validation
+- `firstName` is required
+- `lastName` is required
+- Other fields are optional
+- Update requests support partial update
 
 ## Example curl commands
 
@@ -161,3 +217,9 @@ curl -X DELETE "http://localhost:9025/tms-core/assignment-user/1"
 - Detail cache keys are stored as: assignment_users:detail:<id>
 - Cache entries expire after 5 minutes
 - Import/create/update/delete operations refresh the list cache from MySQL
+
+## Notes
+
+- Records are soft deleted using the `deleted_at` column
+- The list and detail APIs only return rows where `deleted_at IS NULL`
+- The application is designed as a simple assignment project and keeps the implementation focused on CSV import + CRUD + Redis caching
