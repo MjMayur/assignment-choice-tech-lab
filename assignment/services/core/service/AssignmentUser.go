@@ -3,17 +3,17 @@ package service
 import (
 	"context"
 	"encoding/csv"
-	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
-	"strings"
-	"time"
-
 	"project/entity"
+
 	assignmentContext "project/pkg/context"
 	"project/pkg/errors"
 	"project/pkg/log"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/go-redis/redis/v8"
 )
@@ -32,10 +32,13 @@ func NewAssignmentUserServiceImpl(assignmentUserRepo AssignmentUserRepo, redisCl
 	}, nil
 }
 
+// StoreCsvRecords processes CSV file and stores records
+// StoreCsvRecords processes CSV file and stores records
 func (s *AssignmentUserServiceImpl) StoreCsvRecords(ctx context.Context, csvFile *multipart.FileHeader) (map[string]interface{}, map[string]interface{}, string, errors.Response) {
 	reqID, _ := assignmentContext.GetRequestIDFromContext(ctx)
 	log.Info("service: StoreCsvRecords started", reqID)
 
+	// Open the uploaded file
 	file, err := csvFile.Open()
 	if err != nil {
 		log.Error("Failed to open CSV file: "+err.Error(), reqID)
@@ -43,26 +46,30 @@ func (s *AssignmentUserServiceImpl) StoreCsvRecords(ctx context.Context, csvFile
 	}
 	defer file.Close()
 
+	// Create CSV reader
 	reader := csv.NewReader(file)
 	reader.TrimLeadingSpace = true
 	reader.LazyQuotes = true
-	reader.FieldsPerRecord = -1
+	reader.FieldsPerRecord = -1 // Allow variable number of fields
 
+	// Read header
 	header, err := reader.Read()
 	if err != nil {
 		log.Error("Failed to read CSV header: "+err.Error(), reqID)
 		return nil, nil, "", errors.ResponseBadRequestError("Failed to read CSV header: " + err.Error())
 	}
 
+	// Validate header
 	expectedHeaders := []string{"first_name", "last_name", "company_name", "address", "city", "county", "postal", "phone", "email", "web"}
 	if err := s.validateCSVHeader(header, expectedHeaders); err != nil {
 		log.Error("Invalid CSV header: "+err.Error(), reqID)
 		return nil, nil, "", errors.ResponseBadRequestError("Invalid CSV header: " + err.Error())
 	}
 
+	// Process records
 	cleanRecords := []entity.AssignmentUser{}
 	ignoredRecords := []map[string]interface{}{}
-	lineNumber := 2
+	lineNumber := 2 // Start from line 2 (after header)
 
 	for {
 		record, err := reader.Read()
@@ -70,6 +77,7 @@ func (s *AssignmentUserServiceImpl) StoreCsvRecords(ctx context.Context, csvFile
 			break
 		}
 		if err != nil {
+			log.Info(fmt.Sprintf("Error reading CSV row %d: %v", lineNumber, err), reqID)
 			ignoredRecords = append(ignoredRecords, map[string]interface{}{
 				"line":   lineNumber,
 				"error":  "Failed to read row: " + err.Error(),
@@ -79,7 +87,9 @@ func (s *AssignmentUserServiceImpl) StoreCsvRecords(ctx context.Context, csvFile
 			continue
 		}
 
+		// Validate record
 		user, isValid, validationErrors := s.validateCSVRecord(record, header)
+
 		if isValid {
 			cleanRecords = append(cleanRecords, user)
 		} else {
@@ -92,6 +102,9 @@ func (s *AssignmentUserServiceImpl) StoreCsvRecords(ctx context.Context, csvFile
 		lineNumber++
 	}
 
+	log.Info(fmt.Sprintf(fmt.Sprintf("Validation completed - Clean: %d, Ignored: %d", len(cleanRecords), len(ignoredRecords))), reqID)
+
+	// Insert clean records
 	var insertedCount int
 	var successMsg string
 	if len(cleanRecords) > 0 {
@@ -100,12 +113,12 @@ func (s *AssignmentUserServiceImpl) StoreCsvRecords(ctx context.Context, csvFile
 			log.Error("Failed to insert records: "+err.Error(), reqID)
 			return nil, nil, "", errors.ResponseInternalServerError("Failed to insert records: " + err.Error())
 		}
-		s.refreshAssignmentUserListCache(ctx)
 		successMsg = fmt.Sprintf("Successfully inserted %d records", insertedCount)
 	} else {
 		successMsg = "No valid records to insert"
 	}
 
+	// Prepare response maps
 	storeMap := map[string]interface{}{
 		"totalRecords":  len(cleanRecords),
 		"insertedCount": insertedCount,
@@ -121,16 +134,19 @@ func (s *AssignmentUserServiceImpl) StoreCsvRecords(ctx context.Context, csvFile
 	return storeMap, ignoreMap, successMsg, nil
 }
 
+// validateCSVHeader validates CSV header
 func (s *AssignmentUserServiceImpl) validateCSVHeader(header []string, expectedHeaders []string) error {
 	if len(header) < len(expectedHeaders) {
 		return fmt.Errorf("expected at least %d columns, got %d", len(expectedHeaders), len(header))
 	}
 
+	// Convert header to lowercase
 	headerMap := make(map[string]bool)
 	for _, h := range header {
 		headerMap[strings.ToLower(strings.TrimSpace(h))] = true
 	}
 
+	// Check required columns
 	var missingColumns []string
 	for _, expected := range expectedHeaders {
 		if !headerMap[expected] {
@@ -145,15 +161,18 @@ func (s *AssignmentUserServiceImpl) validateCSVHeader(header []string, expectedH
 	return nil
 }
 
+// validateCSVRecord validates a single CSV record
 func (s *AssignmentUserServiceImpl) validateCSVRecord(record []string, header []string) (entity.AssignmentUser, bool, []string) {
-	var validationErrors []string
+	var errors []string
 	user := entity.AssignmentUser{}
 
+	// Create header map
 	headerMap := make(map[string]int)
 	for i, h := range header {
 		headerMap[strings.ToLower(strings.TrimSpace(h))] = i
 	}
 
+	// Helper to get value
 	getValue := func(columnName string) string {
 		if idx, ok := headerMap[columnName]; ok && idx < len(record) {
 			return strings.TrimSpace(record[idx])
@@ -161,6 +180,7 @@ func (s *AssignmentUserServiceImpl) validateCSVRecord(record []string, header []
 		return ""
 	}
 
+	// Extract values
 	user.FirstName = getValue("first_name")
 	user.LastName = getValue("last_name")
 	user.CompanyName = getValue("company_name")
@@ -172,33 +192,47 @@ func (s *AssignmentUserServiceImpl) validateCSVRecord(record []string, header []
 	user.Email = getValue("email")
 	user.Web = getValue("web")
 
+	// Validate First Name
 	if user.FirstName == "" {
-		validationErrors = append(validationErrors, "first_name is required")
-	}
-	if user.LastName == "" {
-		validationErrors = append(validationErrors, "last_name is required")
-	}
-	if user.Email != "" && !s.isValidEmailFormat(user.Email) {
-		validationErrors = append(validationErrors, "invalid email format: "+user.Email)
-	}
-	if user.Phone != "" && len(user.Phone) < 5 {
-		validationErrors = append(validationErrors, "phone number is too short (minimum 5 characters)")
-	}
-	if user.Postal != "" && len(user.Postal) < 2 {
-		validationErrors = append(validationErrors, "postal code is too short (minimum 2 characters)")
+		errors = append(errors, "first_name is required")
 	}
 
-	return user, len(validationErrors) == 0, validationErrors
+	// Validate Last Name
+	if user.LastName == "" {
+		errors = append(errors, "last_name is required")
+	}
+
+	// Validate Email (if provided)
+	if user.Email != "" && !s.isValidEmailFormat(user.Email) {
+		errors = append(errors, "invalid email format: "+user.Email)
+	}
+
+	// Validate Phone (if provided)
+	if user.Phone != "" && len(user.Phone) < 5 {
+		errors = append(errors, "phone number is too short (minimum 5 characters)")
+	}
+
+	// Validate Postal code (if provided)
+	if user.Postal != "" && len(user.Postal) < 2 {
+		errors = append(errors, "postal code is too short (minimum 2 characters)")
+	}
+
+	isValid := len(errors) == 0
+	return user, isValid, errors
 }
 
+// isValidEmailFormat validates email format
 func (s *AssignmentUserServiceImpl) isValidEmailFormat(email string) bool {
 	if email == "" {
 		return true
 	}
+
+	// Check if contains @ and .
 	if !strings.Contains(email, "@") || !strings.Contains(email, ".") {
 		return false
 	}
 
+	// Split email into local and domain parts
 	parts := strings.Split(email, "@")
 	if len(parts) != 2 {
 		return false
@@ -206,10 +240,18 @@ func (s *AssignmentUserServiceImpl) isValidEmailFormat(email string) bool {
 
 	localPart := parts[0]
 	domainPart := parts[1]
-	if localPart == "" || domainPart == "" || !strings.Contains(domainPart, ".") {
+
+	// Check if local part is not empty
+	if localPart == "" {
 		return false
 	}
 
+	// Check if domain part has at least one dot and is not empty
+	if domainPart == "" || !strings.Contains(domainPart, ".") {
+		return false
+	}
+
+	// Check if domain part has valid TLD (at least 2 characters after last dot)
 	domainParts := strings.Split(domainPart, ".")
 	if len(domainParts) < 2 || domainParts[len(domainParts)-1] == "" || len(domainParts[len(domainParts)-1]) < 2 {
 		return false
@@ -224,59 +266,53 @@ func (s *AssignmentUserServiceImpl) CreateAssignmentUser(ctx context.Context, as
 
 	assignmentUserID, errResp := s.assignmentUserRepo.CreateAssignmentUser(ctx, assignmentUser)
 	if errResp != nil {
+		log.Error(errResp.Error(), reqID)
 		return 0, errResp
 	}
 
-	s.refreshAssignmentUserListCache(ctx)
-	log.Info("core>service>assignmentUser: create assignment user completed", reqID)
+	log.Info("core>service>assignmentUser: create assignment user completed & assignment user id is "+strconv.Itoa(assignmentUserID), reqID)
 	return assignmentUserID, nil
 }
 
 func (s *AssignmentUserServiceImpl) PartialUpdateAssignmentUser(ctx context.Context, assignmentUser entity.AssignmentUser) errors.Response {
 	reqID, _ := assignmentContext.GetRequestIDFromContext(ctx)
-	log.Info("core>service>assignmentUser: partial update assignment user started", reqID)
+	log.Info("core>service>assignmentUser: partila update assignment user started for assignment user id "+strconv.Itoa(assignmentUser.ID), reqID)
 
 	errResp := s.assignmentUserRepo.PartialUpdateAssignmentUser(ctx, assignmentUser)
 	if errResp != nil {
+		log.Error(errResp.Error(), reqID)
 		return errResp
 	}
 
-	s.refreshAssignmentUserListCache(ctx)
-	log.Info("core>service>assignmentUser: partial update assignment user completed", reqID)
+	log.Info("core>service>assignmentUser: update assignment user completed for assignment user id "+strconv.Itoa(assignmentUser.ID), reqID)
 	return nil
 }
 
 func (s *AssignmentUserServiceImpl) DeleteAssignmentUser(ctx context.Context, assignmentUserID int) errors.Response {
 	reqID, _ := assignmentContext.GetRequestIDFromContext(ctx)
-	log.Info("core>service>assignmentUser: delete assignment user started", reqID)
+	log.Info("core>service>assignmentUser: delete assignment user started for assignment user id "+strconv.Itoa(assignmentUserID), reqID)
 
 	errResp := s.assignmentUserRepo.DeleteAssignmentUser(ctx, assignmentUserID)
 	if errResp != nil {
+		log.Error(errResp.Error(), reqID)
 		return errResp
 	}
 
-	s.refreshAssignmentUserListCache(ctx)
-	log.Info("core>service>assignmentUser: delete assignment user completed", reqID)
+	log.Info("core>service>assignmentUser: delete assignment user completed for assignment user id "+strconv.Itoa(assignmentUserID), reqID)
 	return nil
 }
 
 func (s *AssignmentUserServiceImpl) GetAssignmentUserbyID(ctx context.Context, assignmentUserID int) (entity.AssignmentUser, errors.Response) {
 	reqID, _ := assignmentContext.GetRequestIDFromContext(ctx)
-	log.Info("core>service>assignmentUser: get assignment user started", reqID)
-
-	cacheKey := fmt.Sprintf("assignment_users:detail:%d", assignmentUserID)
-	var cachedUser entity.AssignmentUser
-	if s.getCachedValue(ctx, cacheKey, &cachedUser) {
-		return cachedUser, nil
-	}
+	log.Info("core>service>assignmentUser: get assignment user started for assignment user id "+strconv.Itoa(assignmentUserID), reqID)
 
 	assignmentUser, errResp := s.assignmentUserRepo.GetAssignmentUserbyID(ctx, assignmentUserID)
 	if errResp != nil {
-		return assignmentUser, errResp
+		log.Error(errResp.Error(), reqID)
+		return entity.AssignmentUser{}, errResp
 	}
 
-	s.setCachedValue(ctx, cacheKey, assignmentUser)
-	log.Info("core>service>assignmentUser: get assignment user completed", reqID)
+	log.Info("core>service>assignmentUser: assignment user fetched successfully for assignment user id "+strconv.Itoa(assignmentUserID), reqID)
 	return assignmentUser, nil
 }
 
@@ -284,83 +320,12 @@ func (s *AssignmentUserServiceImpl) ListAssignmentUser(ctx context.Context) (int
 	reqID, _ := assignmentContext.GetRequestIDFromContext(ctx)
 	log.Info("core>service>assignmentUser: assignment user list started", reqID)
 
-	cacheKey := "assignment_users:list"
-	var cachedList struct {
-		TotalRecords int                     `json:"totalRecords"`
-		Records      []entity.AssignmentUser `json:"records"`
-	}
-	if s.getCachedValue(ctx, cacheKey, &cachedList) {
-		return cachedList.TotalRecords, cachedList.Records, nil
-	}
-
-	totalRecords, assignmentUsers, errResp := s.assignmentUserRepo.ListAssignmentUser(ctx)
+	totalRecords, assignmentUsersEntity, errResp := s.assignmentUserRepo.ListAssignmentUser(ctx)
 	if errResp != nil {
+		log.Error(errResp.Error(), reqID)
 		return 0, nil, errResp
 	}
 
-	cachedList = struct {
-		TotalRecords int                     `json:"totalRecords"`
-		Records      []entity.AssignmentUser `json:"records"`
-	}{
-		TotalRecords: totalRecords,
-		Records:      assignmentUsers,
-	}
-	s.setCachedValue(ctx, cacheKey, cachedList)
 	log.Info("core>service>assignmentUser: assignment user list completed", reqID)
-	return totalRecords, assignmentUsers, nil
-}
-
-func (s *AssignmentUserServiceImpl) refreshAssignmentUserListCache(ctx context.Context) {
-	if s.redisClient == nil {
-		return
-	}
-
-	totalRecords, assignmentUsers, errResp := s.assignmentUserRepo.ListAssignmentUser(ctx)
-	if errResp != nil {
-		log.Error("failed to refresh assignment user list cache: "+errResp.Error(), "")
-		return
-	}
-
-	cachedList := struct {
-		TotalRecords int                     `json:"totalRecords"`
-		Records      []entity.AssignmentUser `json:"records"`
-	}{
-		TotalRecords: totalRecords,
-		Records:      assignmentUsers,
-	}
-
-	if err := s.setCachedValue(ctx, "assignment_users:list", cachedList); err != nil {
-		log.Error("failed to set assignment user list cache: "+err.Error(), "")
-	}
-}
-
-func (s *AssignmentUserServiceImpl) getCachedValue(ctx context.Context, key string, target interface{}) bool {
-	if s.redisClient == nil {
-		return false
-	}
-
-	payload, err := s.redisClient.Get(ctx, key).Result()
-	if err != nil {
-		return false
-	}
-
-	if err := json.Unmarshal([]byte(payload), target); err != nil {
-		log.Error("failed to decode cache payload: "+err.Error(), "")
-		return false
-	}
-
-	return true
-}
-
-func (s *AssignmentUserServiceImpl) setCachedValue(ctx context.Context, key string, value interface{}) error {
-	if s.redisClient == nil {
-		return nil
-	}
-
-	payload, err := json.Marshal(value)
-	if err != nil {
-		return err
-	}
-
-	return s.redisClient.Set(ctx, key, payload, s.cacheTTL).Err()
+	return totalRecords, assignmentUsersEntity, nil
 }
